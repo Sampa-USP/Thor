@@ -1,0 +1,356 @@
+#
+# Sequência de comandos usada para instalar e configurar a workstation thor
+#
+# Sistema: fedora server 37
+#
+# user: sampa
+# passwd: padrão do grupo
+#
+# Não execute cegamente, provavelmete vai precisar de adaptações
+#
+
+# quase tudo (mas não tudo) deve ser executado como root
+sudo su
+dnf update
+dnf group list
+dnf groupinstall "C Development Tools and Libraries"
+# dnf install @base-x gnome-shell gnome-terminal nautilus 
+dnf install gcc-gfortran.x86_64 cmake automake git boost
+# systemctl set-default graphical.target
+dnf install python3-cpuinfo
+
+
+# Cockpit
+# Se não estiver já instalado (durante a instalção do sistema)
+dnf install cockpit
+systemctl enable --now cockpit.socket
+firewall-cmd --add-service=cockpit --permanent
+firewall-cmd --reload
+# Depois de instalado, você pode acessar o cockpit remotamente. Não precisa mais estar no terminal da máquina.
+# Browse https://localhost:9090/ or https://your_ip_address:9090/ from any web browser and login with your user credentials.
+
+
+
+# Se tiver GPU:
+# NVIDIA
+dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/fedora37/x86_64/cuda-fedora37.repo
+dnf -y module install nvidia-driver:latest-dkms
+dnf install cuda-toolkit.x86_64 nvidia-driver-cuda nvidia-driver-libs
+reboot
+
+
+# Se o processador for intel, instale o oneAPI e não este
+# AOCL = MKL da AMD:
+# https://www.amd.com/en/developer/aocl.html
+dnf install ./aocl-linux-gcc-4.0-1.x86_64.rpm
+
+
+# OpenMPI
+# Você pode criar várias versões do MPI com compiladores diferentes, como os da intel
+# Aqui é openmpi + gnu
+wget https://download.open-mpi.org/release/open-mpi/v4.1/openmpi-4.1.4.tar.bz2
+tar -xjvf openmpi-4.1.4.tar.bz2 
+dnf install hwloc.x86_64 hwloc-devel.x86_64
+CFLAGS='-march=native' CXXFLAGS='-march=native' FCFLAGS='-march=native' ./configure --prefix=/opt/openmpi-4.1.4-gcc --with-pmix --enable-mpi-cxx --enable-shared --enable-static --with-cuda
+make -j4
+make install
+
+
+# SLURM
+# Inicialmente, sugiro copiar a configuração de outra máquina
+# https://slurm.schedmd.com/configurator.html
+dnf install slurm.x86_64 slurm-slurmctld.x86_64 slurm-slurmd.x86_64 slurm-slurmdbd.x86_64 mariadb-server
+systemctl enable slurmctld.service 
+systemctl enable slurmdbd.service
+systemctl enable slurmd.service
+systemctl enable munge.service 
+mungekey -c -v
+chown munge: /etc/munge/munge.key 
+systemctl enable --now mariadb
+mysql_secure_installation
+mysql -u root -p
+create user 'slurm'@'localhost' identified by 'password';
+grant all on slurm_acct_db.* TO 'slurm'@'localhost';
+# add to /etc/slurm/slurm.conf
+# SelectTypeParameters=CR_Core_Memory
+
+
+# disk health monitoring
+vi /etc/smartmontools/smartd.conf
+# comment out line:
+# DEVICESCAN
+# add:
+#/dev/sda -a -o on -S on -s (S/../.././02|L/../../6/03) -m root,alberto.trj@gmail.com,alvaro.torrez@usp.br,alesandrokirch@gmail.com -M exec /usr/libexec/smartmontools/smartdnotify
+#/dev/sdb -a -o on -S on -s (S/../.././02|L/../../6/03) -m root,alberto.trj@gmail.com,alvaro.torrez@usp.br,alesandrokirch@gmail.com -M exec /usr/libexec/smartmontools/smartdnotify
+
+
+# Monitoramento:
+# Performance Co-Pilot + Grafana:
+dnf install lm_sensors.x86_64 cockpit-pcp.x86_64 redis
+sensors-detect
+# enable cockpit-pcp on cockpit
+# In cockpit:
+# enable "Collect Metrics" in "Metrics Settings"
+# enable "Export to Network" in "Metrics Settings"
+dnf install grafana grafana-pcp pcp-gui pcp-pmda-slurm.x86_64 pcp-pmda-nvidia-gpu.x86_64 pcp-pmda-lmsensors.x86_64 pcp-pmda-summary pcp-pmda-smart RediSearch.x86_64
+systemctl enable --now grafana-server
+cd /var/lib/pcp/pmdas/nvidia
+./Install
+cd /var/lib/pcp/pmdas/lmsensors/
+sensors -u
+./Install
+cd /var/lib/pcp/pmdas/slurm/
+./Install
+# O plugin do slurm para o pcp deu erro na hora de instalar
+cd /var/lib/pcp/pmdas/smart/
+./Install 
+cd ../summary/
+./Install
+systemctl enable redis pmlogger pmproxy pmlogger
+systemctl start redis pmlogger pmproxy pmlogger
+firewall-cmd --add-service=grafana --permanent
+firewall-cmd --add-service=pmproxy --permanent
+firewall-cmd --reload
+
+# Página de monitoramento (grafana + pcp) pode ser acessada via
+# http://thor.dyn.if.usp.br:3000
+echo 'Monitoring tool: http://thor.dyn.if.usp.br:3000' > /etc/motd.d/PCP-grafana
+
+
+# Módulos
+# Provavelmente você vai precisar modificar esta parte de acordo com a máquina
+# Fica como referência:
+dnf install environment-modules
+mkdir /opt/modulesfiles
+cat << EOF > /etc/profile.d/cluster-modules.sh
+export MODULEPATH=\${MODULEPATH}:/opt/AMD/aocl/aocl-linux-gcc-4.0:/opt/modulesfiles
+EOF
+
+mkdir -p /opt/modulesfiles/openmpi/gnu
+cat << EOF > /opt/modulesfiles/openmpi/gnu/4.1.4
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "OpenMPI + GNU 12.2.1 64-bit Compiler"
+
+# Set intermediate variables
+set    _flavor               "gcc"
+set    __ompiroot            "/opt/openmpi-4.1.4-\${_flavor}"
+
+# Setup environment variables
+prepend-path    LD_LIBRARY_PATH    \${__ompiroot}/lib
+prepend-path    LIBRARY_PATH       \${__ompiroot}/lib
+prepend-path    CPATH              \${__ompiroot}/include
+prepend-path    PKG_CONFIG_PATH    \${__ompiroot}/lib/pkgconfig
+
+# PATH
+prepend-path PATH "\${__ompiroot}/bin"
+
+# MANPATH
+append-path MANPATH "\${__ompiroot}/share/man"
+EOF
+
+
+# VASP
+# como usuário "sampa"
+su - sampa
+module load aocl-linux-gcc-4.0_module
+module load openmpi/gnu/4.1.4
+# compilar vasp
+cd ~/Packages/vasp.6.3.0
+cp arch/makefile.include.gnu_ompi_aocl ./makefile.include
+# colocar:
+# AMDBLIS_ROOT, AMDLIBFLAME_ROOT, AMDSCALAPACK_ROOT, AMDFFTW_ROOT =
+# /opt/AMD/aocl/aocl-linux-gcc-4.0
+make DEPS=1 -j4 all
+for i in std gam ncl; do cp build/$i/vasp vasp_$i; done
+
+
+# Pra compilar a versão 6.X do vasp pra gpu precisa do Nvidia HPC SDK
+# Cheque a versão mais recente/compatível/necessária
+dnf config-manager --add-repo https://developer.download.nvidia.com/hpc-sdk/rhel/nvhpc.repo
+dnf install nvhpc-23.1
+echo 'export MODULEPATH=${MODULEPATH}:/opt/AMD/aocl/aocl-linux-gcc-4.0:/opt/modulesfiles:/opt/nvidia/hpc_sdk/modulefiles' > /etc/profile.d/cluster-modules.sh
+
+
+# Pra compilar vasp + gpu + aocl:
+source /etc/profile.d/cluster-modules.sh
+module purge
+module load aocl-linux-gcc-4.0_module nvhpc-hpcx/23.1 
+cp arch/makefile.include.nvhpc_omp_acc ./makefile.include
+vi ./makefile.include
+# linhas alteradas:
+# ajuste tp= ... conforme o processador e gpu=... conforme a gpu
+# ajuste o resto conforme o resto
+FC          = mpif90 -acc -gpu=cc86,cuda12.0 -mp -tp=zen3
+FCL         = mpif90 -acc -gpu=cc86,cuda12.0 -mp -tp=zen3 -c++libs
+FC_LIB      = nvfortran -tp=zen3
+CC_LIB      = nvc -tp=zen3 -w
+BLAS        = -lblis
+LAPACK      = -lflame
+FFTW_ROOT  ?= /opt/AMD/aocl/aocl-linux-gcc-4.0
+#
+make DEPS=1 -j8 all
+for i in std gam ncl; do cp build/$i/vasp vasp_gpu_aocl_$i; done
+
+# como "sampa"
+vi ./makefile.include
+# linhas alteradas:
+BLAS        = -lblas
+LAPACK      = -llapack 
+make DEPS=1 -j8 all
+for i in std gam ncl; do cp build/$i/vasp vasp_gpu_$i; done
+
+# como root:
+mkdir -p /opt/modulesfiles/vasp/6.3.0
+cd /opt/modulesfiles/vasp/6.3.0
+cat << EOF > cpu
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "VASP 6.3.0 comiled with OpenMPI + AOCL"
+
+# Load required dependencies
+if { ![ is-loaded openmpi/gnu/4.1.4 ] } { module load openmpi/gnu/4.1.4 }
+if { ![ is-loaded aocl-linux-gcc-4.0_module ] } { module load aocl-linux-gcc-4.0_module }
+
+# PATH
+prepend-path PATH "/opt/bin"
+EOF
+
+cat << EOF > gpu
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "VASP 6.3.0 comiled with Nvidia HPC SDK"
+
+# Load required dependencies
+if { ![ is-loaded nvhpc-hpcx/23.1 ] } { module load nvhpc-hpcx/23.1 }
+
+# PATH
+prepend-path PATH "/opt/bin"
+EOF
+
+# como root:
+mkdir /opt/bin
+cp ./vasp_* /opt/bin
+
+
+# SIESTA
+# https://docs.siesta-project.org/projects/siesta/en/latest/how-to/build-install.html
+# como "sampa":
+cd /home/sampa/Packages/siesta/siesta-v4.1.5/Obj
+module purge
+module load openmpi/gnu/4.1.4 aocl-linux-gcc-4.0_module
+
+vi arch.make
+# editar:
+# compiladores gcc, gfortran e openmpi
+# blas, lapack da aocl: blis e flame
+# otimização: -march=native -mtune=native
+# para a atual versão do gfortran precisa usar: -fallow-argument-mismatch
+# adicionar "-lalm -lm" em LIBS
+make
+
+# como root:
+cp siesta /opt/bin/
+mkdir -p /opt/modulesfiles/siesta
+cd /opt/modulesfiles/siesta
+cat << EOF > 4.1.5
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "SIESTA 4.1.5 comiled with OpenMPI + AOCL"
+
+# Load required dependencies
+if { ![ is-loaded openmpi/gnu/4.1.4 ] } { module load openmpi/gnu/4.1.4 }
+if { ![ is-loaded aocl-linux-gcc-4.0_module ] } { module load aocl-linux-gcc-4.0_module }
+
+# PATH
+prepend-path PATH "/opt/bin"
+EOF
+
+
+# LAMMPS
+dnf install python3-devel python3-pip dnf eigen3-devel
+wget https://download.lammps.org/tars/lammps-stable.tar.gz
+tar -xzvf lammps-stable.tar.gz
+cd lammps-23Jun2022
+mkdir build; cd build
+module load aocl-linux-gcc-4.0_module openmpi/gnu/4.1.4 cuda/12.1
+cat << EOF > ../cmake.bsh 
+cmake \
+        -C ../cmake/presets/most.cmake \
+        -D PKG_GPU=yes \
+                -D GPU_API=cuda \
+                -D GPU_ARCH=86 \
+                -D CUDA_MPS_SUPPORT=yes \
+        -D PKG_COLVARS=yes \
+        -D PKG_KSPACE=yes \
+        -D PKG_OPENMP=yes \
+        -D PKG_OPT=yes \
+        -D PKG_PYTHON=yes \
+        -D PKG_POEMS=yes \
+        -D PKG_REAXFF=yes \
+        -D FFT=FFTW3 \
+                -D FFT_FFTW_THREADS=off \
+		-D FFTW3_INCLUDE_DIR=/opt/AMD/aocl/aocl-linux-gcc-4.0/include \
+                -D FFTW3_LIBRARY=/opt/AMD/aocl/aocl-linux-gcc-4.0/lib/libfftw3.so \
+	-D USE_INTERNAL_LINALG=no \
+	-D LAPACK_LIBRARIES=-lflame \
+        -D CMAKE_TUNE_FLAGS=-march=native \
+        -D CMAKE_INSTALL_PREFIX=/opt/lammps-23Jun2022 \
+../cmake
+EOF
+../cmake.bsh
+cmake --build . -j8
+
+# root:
+module load aocl-linux-gcc-4.0_module openmpi/gnu/4.1.4
+make install
+mkdir -p /opt/modulesfiles/lammps/23Jun2022
+cd /opt/modulesfiles/lammps/23Jun2022
+cat << EOF > gpu
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "LAMMPS 23Jun2022 comiled with OpenMPI + GNU + CUDA"
+
+# Load required dependencies
+if { ![ is-loaded openmpi/gnu/4.1.4 ] } { module load openmpi/gnu/4.1.4 }
+if { ![ is-loaded aocl-linux-gcc-4.0_module ] } { module load aocl-linux-gcc-4.0_module }
+
+# Environment variables
+prepend-path PATH          "/opt/lammps-23Jun2022/bin"
+prepend-path LIBRARY_PATH  "/opt/lammps-23Jun2022/lib"
+prepend-path MANPATH       "/opt/lammps-23Jun2022/share/man"
+EOF
+
+
+# monitoramento de uso do /home
+cat << EOF > /etc/cron.daily/check_home_usage.bsh
+du -s \$(ls -1d /home/*/ \
+	| grep -v 'lost+found\|slurm') \
+	| awk -v FS='/' -v ds=\$(df | grep home | awk '{print \$2}') '
+		BEGIN{printf("\nUso da partição home:\n")}
+		{
+			printf("%12s %6.2f %\n", \$3, 100*\$1/ds)
+		}' \
+> /etc/motd.d/home-disk-usage
+EOF
+chmod +x /etc/cron.daily/check_home_usage.bsh
+/etc/cron.daily/check_home_usage.bsh
+
+
+# 
+dnf install python3-numpy.x86_64 python2-numpy.x86_64
+dnf install gnuplot
+
+
+# apptainer
+dnf install apptainer.x86_64
