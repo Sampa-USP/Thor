@@ -354,3 +354,93 @@ dnf install gnuplot
 
 # apptainer
 dnf install apptainer.x86_64
+
+
+# KrelLBM (código do Surmas):
+
+#
+# BOOST
+#
+mkdir ~/lib
+cd ~/lib
+wget https://boostorg.jfrog.io/artifactory/main/release/1.81.0/source/boost_1_81_0.tar.bz2
+tar -xjvf boost_1_81_0.tar.bz2
+cd boost_1_81_0/
+./bootstrap.sh --prefix=/opt/boost-1.81.0 --show-libraries
+CFLAGS='-march=native' CXXFLAGS='-march=native' ./bootstrap.sh --prefix=/opt/boost-1.81.0
+./b2 install --prefix=/opt/boost-1.81.0 variant=release optimization=speed cxxflags='-march=native' cflags='-march=native'
+sudo ./b2 install --prefix=/opt/boost-1.81.0 variant=release optimization=speed cxxflags='-march=native' cflags='-march=native'
+sudo mkdir -p /opt/modulesfiles/boost
+sudo cat << EOF > /opt/modulesfiles/boost/1.81.0
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "Boost C++ libraries + GNU 12.2.1 64-bit Compiler"
+
+set BOOST_ROOT "/opt/boost-1.81.0"
+
+# Setup environment variables
+prepend-path    LD_LIBRARY_PATH    \${BOOST_ROOT}/lib
+prepend-path    LIBRARY_PATH       \${BOOST_ROOT}/lib
+prepend-path    CPATH              \${BOOST_ROOT}/include
+EOF
+
+#
+# METIS
+#
+cd ~/lib
+wget http://glaros.dtc.umn.edu/gkhome/fetch/sw/metis/metis-5.1.0.tar.gz
+tar -xzvf metis-5.1.0.tar.gz
+cd metis-5.1.0/
+CFLAGS='-march=native' make config shared=1 prefix=/opt/metis-5.1.0
+CFLAGS='-march=native' make
+sudo make install
+sudo mkdir -p /opt/modulesfiles/metis
+sudo cat << EOF > /opt/modulesfiles/metis/5.1.0
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "Metis 5.1.0 + GNU 12.2.1 64-bit Compiler"
+
+set METIS_ROOT "/opt/metis-5.1.0"
+
+# Setup environment variables
+prepend-path    LD_LIBRARY_PATH    \${METIS_ROOT}/lib
+prepend-path    LIBRARY_PATH       \${METIS_ROOT}/lib
+prepend-path    CPATH              \${METIS_ROOT}/include
+prepend-path    PATH               \${METIS_ROOT}/bin
+EOF
+
+
+#
+# PARMETIS
+#
+cd ~/lib
+wget http://glaros.dtc.umn.edu/gkhome/fetch/sw/parmetis/parmetis-4.0.3.tar.gz
+tar -xzvf parmetis-4.0.3.tar.gz
+cd parmetis-4.0.3/
+module load openmpi/gnu/4.1.4
+CFLAGS='-march=native' make config shared=1 prefix=/opt/parmetis-4.0.3
+CFLAGS='-march=native' make
+sudo make install
+sudo mkdir -p /opt/modulesfiles/parmetis
+sudo cat << EOF > /opt/modulesfiles/parmetis/4.0.3
+#%Module1.0###################################################################
+
+# ###### Component Specific env vars setup ###################################
+
+module-whatis "ParMetis 4.0.3 + OpenMPI + GNU 12.2.1 64-bit Compiler"
+
+set PARMETIS_ROOT "/opt/parmetis-4.0.3"
+
+# Load dependencies
+if { ![ is-loaded openmpi/gnu/4.1.4 ] } { module load openmpi/gnu/4.1.4 }
+if { ![ is-loaded metis/5.1.0 ] } { module load metis/5.1.0 }
+
+# Setup environment variables
+prepend-path    LD_LIBRARY_PATH    \${PARMETIS_ROOT}/lib
+prepend-path    LIBRARY_PATH       \${PARMETIS_ROOT}/lib
+prepend-path    CPATH              \${PARMETIS_ROOT}/include
+prepend-path    PATH               \${PARMETIS_ROOT}/bin
